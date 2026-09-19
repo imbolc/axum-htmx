@@ -1,7 +1,12 @@
 //! Axum extractors for htmx request headers.
 
-use axum_core::extract::FromRequestParts;
-use http::request::Parts;
+use std::marker::PhantomData;
+
+use axum_core::{
+    extract::FromRequestParts,
+    response::{IntoResponse, Response},
+};
+use http::{StatusCode, header::LOCATION, request::Parts};
 
 use crate::{
     HX_BOOSTED, HX_CURRENT_URL, HX_HISTORY_RESTORE_REQUEST, HX_PROMPT, HX_REQUEST, HX_TARGET,
@@ -244,5 +249,145 @@ where
         }
 
         Ok(HxTrigger(None))
+    }
+}
+
+/// Requires the `HX-Request` header, redirecting requests that omit it to a
+/// user defined location.
+///
+/// Put this first in a handler's arguments to reject requests before later
+/// extractors and the handler run. `T` implements [`HxRequiredRedirect`]
+/// to choose the redirect location.
+///
+/// # Example
+///
+/// ```rust
+/// use axum::{http::request::Parts, response::Html};
+/// use axum_htmx::{HxRequired, HxRequiredRedirect};
+///
+/// struct Home;
+///
+/// impl HxRequiredRedirect for Home {
+///     fn location(_: &Parts) -> impl AsRef<str> {
+///         "/"
+///     }
+/// }
+///
+/// async fn fragment(_: HxRequired<Home>) -> Html<&'static str> {
+///     Html("<p>A fragment</p>")
+/// }
+/// ```
+#[derive(Debug)]
+pub struct HxRequired<T>(PhantomData<T>);
+
+/// Supplies the redirect location for requests rejected by [`HxRequired`].
+pub trait HxRequiredRedirect {
+    /// Returns the full-page location, borrowed from request parts or owned.
+    fn location(parts: &Parts) -> impl AsRef<str>;
+}
+
+impl<S, T> FromRequestParts<S> for HxRequired<T>
+where
+    S: Send + Sync,
+    T: HxRequiredRedirect,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let HxRequest(is_htmx) = match HxRequest::from_request_parts(parts, state).await {
+            Ok(hx_request) => hx_request,
+            Err(never) => match never {},
+        };
+        if is_htmx {
+            Ok(Self(PhantomData))
+        } else {
+            Err((
+                StatusCode::SEE_OTHER,
+                [(LOCATION, T::location(parts).as_ref())],
+                (),
+            )
+                .into_response())
+        }
+    }
+}
+
+#[cfg(test)]
+mod hx_required_tests {
+    use axum::{Router, extract::Path, routing::get};
+    use http::StatusCode;
+
+    use super::*;
+
+    struct ParentPage;
+
+    impl HxRequiredRedirect for ParentPage {
+        fn location(parts: &Parts) -> impl AsRef<str> {
+            parts.uri.path().strip_suffix("/partial").unwrap()
+        }
+    }
+
+    struct OwnedLocation;
+
+    impl HxRequiredRedirect for OwnedLocation {
+        fn location(parts: &Parts) -> impl AsRef<str> {
+            format!("/full{}", parts.uri.path())
+        }
+    }
+
+    struct InvalidLocation;
+
+    impl HxRequiredRedirect for InvalidLocation {
+        fn location(_: &Parts) -> impl AsRef<str> {
+            "invalid\nlocation"
+        }
+    }
+
+    #[tokio::test]
+    async fn required_redirects_before_later_extractors_and_allows_htmx() {
+        let app = Router::new().route(
+            "/items/{id}/partial",
+            get(|_: HxRequired<ParentPage>, _: Path<u32>| async { StatusCode::NO_CONTENT }),
+        );
+        #[cfg(feature = "auto-vary")]
+        let app = app.layer(crate::AutoVaryLayer);
+        let server = axum_test::TestServer::new(app).unwrap();
+
+        // Reject before Path<u32> tries to parse the invalid ID.
+        let rejected = server.get("/items/invalid/partial").await;
+        rejected.assert_status(StatusCode::SEE_OTHER);
+        rejected.assert_header("location", "/items/invalid");
+
+        let accepted = server
+            .get("/items/1/partial")
+            .add_header(HX_REQUEST, "true")
+            .await;
+        accepted.assert_status(StatusCode::NO_CONTENT);
+
+        #[cfg(feature = "auto-vary")]
+        for response in [rejected, accepted] {
+            response.assert_header("vary", "hx-request");
+        }
+    }
+
+    #[tokio::test]
+    async fn redirects_to_owned_location() {
+        let app = Router::new().route("/fragment", get(|_: HxRequired<OwnedLocation>| async {}));
+        let server = axum_test::TestServer::new(app).unwrap();
+
+        server
+            .get("/fragment")
+            .await
+            .assert_header("location", "/full/fragment");
+    }
+
+    #[tokio::test]
+    async fn invalid_redirect_location_returns_server_error() {
+        let app = Router::new().route("/", get(|_: HxRequired<InvalidLocation>| async {}));
+        let server = axum_test::TestServer::new(app).unwrap();
+
+        server
+            .get("/")
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

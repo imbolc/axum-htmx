@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added extractor based guard `HxRequired<T>` and it trait `HxRequiredRedirect`
+
 ## v0.8.1
 
 - Revert an accidental breaking change introducting a nightly-only feature.

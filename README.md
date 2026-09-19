@@ -24,6 +24,8 @@
     - [Vary Responders](#vary-responders)
   - [Auto Caching Management](#auto-caching-management)
   - [Request Guards](#request-guards)
+    - [Extractor-based](#extractor-based-guard)
+    - [Router-based](#router-based-guard)
   - [Examples](#examples)
     - [Example: Extractors](#example-extractors)
     - [Example: Responders](#example-responders)
@@ -116,6 +118,14 @@ For example, on extracting [`HxRequest`], the middleware automatically adds
 Look at the usage [example][auto-vary-example].
 
 ## Request Guards
+
+### Extractor-based guard
+
+[`HxRequired`](HxRequired) is meant to protect htmx-only handlers from direct
+access. Redirects requests without `HX-Request` header to the related a user
+defined location.
+
+### Router-based guard
 
 __Requires feature `guards`.__
 
